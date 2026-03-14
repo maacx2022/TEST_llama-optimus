@@ -8,8 +8,9 @@ from pathlib import Path
 
 from .core import estimate_max_ngl, run_optimization, warmup_until_stable
 from .hw_profiler import build_hardware_profile
+from .model_arch import AUTO_ARCH_CHOICES, detect_architecture
 from .override_patterns import OVERRIDE_PATTERNS
-from .search_space import ARCH_CHOICES, SEARCH_SPACE, max_threads
+from .search_space import SEARCH_SPACE, max_threads
 from llama_optimus import __version__
 
 
@@ -22,7 +23,7 @@ def main():
     parser.add_argument("--model", type=str, help="Path to target model.")
     parser.add_argument("--llama-bin", type=str, help="Path to llama.cpp build/bin folder.")
     parser.add_argument("--metric", type=str, default="mean", choices=["tg", "pp", "mean"], help="Retained for compatibility; orchestration is always multi-metric.")
-    parser.add_argument("--arch", type=str, default="transformer", choices=ARCH_CHOICES, help="Model architecture family.")
+    parser.add_argument("--arch", type=str, default="auto", choices=AUTO_ARCH_CHOICES, help="Model architecture family or auto-detect from GGUF metadata.")
     parser.add_argument("--ngl-max", type=int, help="Maximum number of model layers for -ngl.")
     parser.add_argument("--repeat", "-r", type=int, default=3, help="Number of llama-bench runs per configuration.")
     parser.add_argument("--n-tokens", type=int, default=192, help="Number of generated tokens used during benchmarking.")
@@ -50,6 +51,7 @@ def main():
         sys.exit(f"ERROR: model not found at {model_path}")
 
     hardware_profile = build_hardware_profile()
+    resolved_arch = detect_architecture(model_path, llama_bin_path) if args.arch == "auto" else args.arch
     print("")
     print("#################")
     print("# LLAMA-OPTIMUS #")
@@ -59,6 +61,7 @@ def main():
     print(f"Profiler threads recommendation: {hardware_profile.recommended_threads}")
     print(f"CPU: {hardware_profile.cpu_name}")
     print(f"GPU: {hardware_profile.gpu_name}")
+    print(f"Resolved architecture: {resolved_arch}")
     print(f"Blackwell features: NVFP4={hardware_profile.enable_nvfp4} PDL={hardware_profile.enable_pdl}")
     print(f"MTDS latency map (ms): {hardware_profile.mtds_latency_ms}")
     print(f"Path to 'llama-bench': {llama_bench_path}")
@@ -67,7 +70,7 @@ def main():
 
     if args.ngl_max is not None:
         SEARCH_SPACE["gpu_layers"]["high"] = args.ngl_max
-    elif args.arch != "bitnet":
+    elif resolved_arch != "bitnet":
         SEARCH_SPACE["gpu_layers"]["high"] = estimate_max_ngl(
             llama_bench_path=llama_bench_path,
             model_path=model_path,
@@ -96,7 +99,7 @@ def main():
         model_path=model_path,
         llama_bin_path=llama_bin_path,
         override_mode=args.override_mode,
-        arch=args.arch,
+        arch=resolved_arch,
         hardware_profile=hardware_profile,
     )
 

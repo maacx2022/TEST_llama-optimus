@@ -1,16 +1,26 @@
-# src/llama_optimus/search_space.py
 import os
-from .override_patterns import OVERRIDE_PATTERNS  # if needed
 
-# count number of available cpu cores
-max_threads = os.cpu_count()
+from .override_patterns import OVERRIDE_PATTERNS
+
+max_threads = os.cpu_count() or 1
+
+ARCH_CHOICES = ["transformer", "lfm", "bitnet", "diffused", "mtp"]
+CACHE_TYPES = ["f16", "q8_0", "q4_0", "mixed"]
+KV_EVICTION_POLICIES = ["disabled", "h2o", "chunkkv"]
 
 SEARCH_SPACE = {
-    'batch_size'     : {'low': 8, 'high': 16384},   # 
-    'ubatch_size'    : {'low': 4, 'high': 8192},    #  
-    'threads':    {'low': 1, 'high': max_threads},  # Adjust range to your hardware
-    'gpu_layers': {'low': 0, 'high': 149},          # (-ngl) Set max according to model and VRAM; The max value must be determined for each setup
-    'flash_attn': [0,1],                            #  --flash-attn <0|1> ; Enables flash attention       
-    'override_spc'   : list(OVERRIDE_PATTERNS.keys()) # Read list from src/llama_optimus/override_patterns.py
-    #'flash_attn_type': [0, 1, 2], # Not yet merged to main llama.cpp
+    "batch_size": {"low": 8, "high": 16384},
+    "ubatch_size": {"low": 4, "high": 8192},
+    "threads": {"low": 1, "high": max_threads},
+    "gpu_layers": {"low": 0, "high": 149},
+    "flash_attn": [0, 1],
+    "override_spc": list(OVERRIDE_PATTERNS.keys()),
+    "draft_max": {"low": 4, "high": 32},
+    "draft_min": {"low": 1, "high": 8},
+    "draft_gpu_layers": {"low": 0, "high": 64},
+    "h2o_heavy_hitters": {"low": 8, "high": 128},
+    "h2o_window": {"low": 128, "high": 4096},
+    "cpu_offload_ratio": {"low": 0.0, "high": 1.0},
+    "micro_batch_ratio": {"low": 0.1, "high": 1.0},
 }
+

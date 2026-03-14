@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from llama_optimus.model_arch import detect_architecture
+from llama_optimus.model_arch import detect_architecture, detect_max_context
 
 
 def test_detect_architecture_from_lfm_metadata_signature(tmp_path: Path):
@@ -22,3 +22,21 @@ def test_detect_architecture_defaults_to_transformer(tmp_path: Path):
     model.write_text("general.architecture\nllama\n")
 
     assert detect_architecture(str(model)) == "transformer"
+
+
+def test_detect_architecture_does_not_map_moa_name_to_diffused(tmp_path: Path):
+    model = tmp_path / "Qwen-MoA-14B.gguf"
+    model.write_text("general.architecture\nllama\n")
+
+    assert detect_architecture(str(model)) == "transformer"
+
+
+def test_detect_max_context_from_metadata_signature(tmp_path: Path):
+    model = tmp_path / "LFM2.5.gguf"
+    model.write_text(
+        "general.architecture = lfm2\n"
+        "lfm2.context_length = 262144\n"
+        "lfm2.rope.scaling.original_context_length = 131072\n"
+    )
+
+    assert detect_max_context(str(model)) == 262144

@@ -10,7 +10,7 @@ from .core import estimate_max_ngl, run_optimization, warmup_until_stable
 from .hw_profiler import build_hardware_profile
 from .model_arch import AUTO_ARCH_CHOICES, detect_architecture
 from .override_patterns import OVERRIDE_PATTERNS
-from .search_space import SEARCH_SPACE, max_threads
+from .search_space import PROFILE_CHOICES, SEARCH_SPACE, max_threads
 from llama_optimus import __version__
 
 
@@ -19,13 +19,14 @@ def main():
         description="llama-optimus: benchmark and orchestrate llama.cpp inference.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--trials", type=int, default=45, help="Number of Optuna trials.")
+    parser.add_argument("--trials", type=int, help="Number of Optuna trials.")
     parser.add_argument("--model", type=str, help="Path to target model.")
     parser.add_argument("--llama-bin", type=str, help="Path to llama.cpp build/bin folder.")
     parser.add_argument("--metric", type=str, default="mean", choices=["tg", "pp", "mean"], help="Retained for compatibility; orchestration is always multi-metric.")
     parser.add_argument("--arch", type=str, default="auto", choices=AUTO_ARCH_CHOICES, help="Model architecture family or auto-detect from GGUF metadata.")
+    parser.add_argument("--profile", type=str, default="balanced", choices=PROFILE_CHOICES, help="Tuning profile: balanced, gpu-first, economic, throughput.")
     parser.add_argument("--ngl-max", type=int, help="Maximum number of model layers for -ngl.")
-    parser.add_argument("--repeat", "-r", type=int, default=3, help="Number of llama-bench runs per configuration.")
+    parser.add_argument("--repeat", "-r", type=int, help="Number of llama-bench runs per configuration.")
     parser.add_argument("--n-tokens", type=int, default=192, help="Number of generated tokens used during benchmarking.")
     parser.add_argument("--n-warmup-tokens", "-nwt", type=int, default=128, help="Warm-up token count.")
     parser.add_argument("--n-warmup-runs", type=int, default=12, help="Maximum warm-up iterations.")
@@ -33,6 +34,13 @@ def main():
     parser.add_argument("--override-mode", type=str, default="scan", choices=["none", "scan", "custom"], help=f"Override tensor scan mode. Presets: {OVERRIDE_PATTERNS.keys()}")
     parser.add_argument("--version", "-v", action="version", version=f"llama-optimus v{__version__}")
     args = parser.parse_args()
+
+    effective_trials = args.trials
+    effective_repeat = args.repeat
+    if effective_trials is None:
+        effective_trials = 30 if args.profile == "throughput" else 45
+    if effective_repeat is None:
+        effective_repeat = 2 if args.profile == "throughput" else 3
 
     llama_bin_path = args.llama_bin or os.environ.get("LLAMA_BIN")
     model_path = args.model or os.environ.get("MODEL_PATH")
@@ -62,6 +70,8 @@ def main():
     print(f"CPU: {hardware_profile.cpu_name}")
     print(f"GPU: {hardware_profile.gpu_name}")
     print(f"Resolved architecture: {resolved_arch}")
+    print(f"Optimization profile: {args.profile}")
+    print(f"Trials / repeat: {effective_trials} / {effective_repeat}")
     print(f"Blackwell features: NVFP4={hardware_profile.enable_nvfp4} PDL={hardware_profile.enable_pdl}")
     print(f"MTDS latency map (ms): {hardware_profile.mtds_latency_ms}")
     print(f"Path to 'llama-bench': {llama_bench_path}")
@@ -91,15 +101,16 @@ def main():
         )
 
     run_optimization(
-        n_trials=args.trials,
+        n_trials=effective_trials,
         n_tokens=args.n_tokens,
         metric=args.metric,
-        repeat=args.repeat,
+        repeat=effective_repeat,
         llama_bench_path=llama_bench_path,
         model_path=model_path,
         llama_bin_path=llama_bin_path,
         override_mode=args.override_mode,
         arch=resolved_arch,
+        profile=args.profile,
         hardware_profile=hardware_profile,
     )
 

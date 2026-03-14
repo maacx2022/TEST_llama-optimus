@@ -47,11 +47,12 @@ def build_speculative_config(trial, target_model: str) -> SpeculativeDecodingCon
         SEARCH_SPACE["draft_min"]["low"],
         SEARCH_SPACE["draft_min"]["high"],
     )
-    draft_max = trial.suggest_int(
+    sampled_draft_max = trial.suggest_int(
         "draft_max",
-        max(draft_min, SEARCH_SPACE["draft_max"]["low"]),
+        SEARCH_SPACE["draft_max"]["low"],
         SEARCH_SPACE["draft_max"]["high"],
     )
+    draft_max = max(draft_min, sampled_draft_max)
     draft_gpu_layers = trial.suggest_int(
         "draft_gpu_layers",
         SEARCH_SPACE["draft_gpu_layers"]["low"],
@@ -93,10 +94,12 @@ def apply_architecture_constraints(
     params: Dict[str, object],
     recommended_threads: int,
     optimal_offload_ratio: float,
+    profile: str = "balanced",
     gpu_available: bool = True,
 ) -> Dict[str, object]:
     tuned = dict(params)
     tuned["arch"] = arch
+    tuned["profile"] = profile
 
     if arch == "transformer":
         tuned["flash_attn"] = 1
@@ -125,5 +128,23 @@ def apply_architecture_constraints(
         tuned["draft_min"] = 0
         tuned["draft_max"] = 0
         tuned["draft_gpu_layers"] = 0
+
+    if profile == "gpu-first":
+        tuned["cpu_offload_ratio"] = min(float(tuned.get("cpu_offload_ratio", 0.0)), 0.1)
+        if gpu_available and arch != "bitnet":
+            tuned["gpu_layers"] = max(int(tuned["gpu_layers"]), 32)
+        if arch in {"transformer", "diffused", "mtp"}:
+            tuned["override_tensor"] = "none"
+            tuned["cache_type_k"] = "f16"
+            tuned["cache_type_v"] = "f16"
+    elif profile == "economic":
+        tuned["cpu_offload_ratio"] = max(float(tuned.get("cpu_offload_ratio", 0.0)), 0.45 if gpu_available else 1.0)
+        if arch != "bitnet":
+            tuned["gpu_layers"] = min(int(tuned["gpu_layers"]), 48)
+    elif profile == "throughput":
+        tuned["flash_attn"] = 1 if arch != "bitnet" else tuned.get("flash_attn", 0)
+        if gpu_available and arch not in {"bitnet", "lfm"}:
+            tuned["gpu_layers"] = max(int(tuned["gpu_layers"]), 64)
+
     tuned["dynamic_offload_ratio"] = optimal_offload_ratio
     return tuned

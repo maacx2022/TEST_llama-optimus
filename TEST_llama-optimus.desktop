@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=TEST llama.optimus
+Comment=Choose a model, start llama-server, then run the optimizer
+Exec=/home/macko/Desktop/TEST_llama-optimus/scripts/launch_llama_optimus_gui.sh
+Icon=/home/macko/Pictures/Screenshots/Screenshot from 2026-03-14 13-12-56.png
+Terminal=false
+Type=Application
+Categories=Development;
+StartupNotify=true

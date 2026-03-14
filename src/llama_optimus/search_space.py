@@ -5,7 +5,8 @@ from .override_patterns import OVERRIDE_PATTERNS
 max_threads = os.cpu_count() or 1
 
 ARCH_CHOICES = ["transformer", "lfm", "bitnet", "diffused", "mtp"]
-CACHE_TYPES = ["f16", "q8_0", "q4_0", "mixed"]
+PROFILE_CHOICES = ["balanced", "gpu-first", "economic", "throughput"]
+CACHE_TYPES = ["f16", "q8_0", "q4_0"]
 KV_EVICTION_POLICIES = ["disabled", "h2o", "chunkkv"]
 
 SEARCH_SPACE = {
@@ -23,4 +24,3 @@ SEARCH_SPACE = {
     "cpu_offload_ratio": {"low": 0.0, "high": 1.0},
     "micro_batch_ratio": {"low": 0.1, "high": 1.0},
 }
-

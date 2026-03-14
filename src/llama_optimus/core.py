@@ -1,4 +1,5 @@
 import math
+import os
 import shlex
 import subprocess
 import tempfile
@@ -260,9 +261,68 @@ def _run_multi_metric_bench(cmd: Sequence[str], params: Dict[str, object], hardw
 
 
 def _base_trial_params(trial, hardware_profile: HardwareProfile) -> Dict[str, object]:
-    batch = trial.suggest_int("batch", SEARCH_SPACE["batch_size"]["low"], SEARCH_SPACE["batch_size"]["high"])
-    ubatch = trial.suggest_int("ubatch", SEARCH_SPACE["ubatch_size"]["low"], min(batch, SEARCH_SPACE["ubatch_size"]["high"]))
-    threads = trial.suggest_int("threads", SEARCH_SPACE["threads"]["low"], min(SEARCH_SPACE["threads"]["high"], hardware_profile.recommended_threads))
+    return _base_trial_params_for_arch(trial, hardware_profile, arch="transformer", model_path="")
+
+
+def _base_trial_params_for_arch(
+    trial,
+    hardware_profile: HardwareProfile,
+    arch: str,
+    model_path: str,
+    profile: str = "balanced",
+) -> Dict[str, object]:
+    model_size_gb = os.path.getsize(model_path) / (1024 ** 3) if model_path and os.path.exists(model_path) else 0.0
+    batch_low = SEARCH_SPACE["batch_size"]["low"]
+    batch_high = SEARCH_SPACE["batch_size"]["high"]
+    ubatch_low = SEARCH_SPACE["ubatch_size"]["low"]
+    ubatch_high = SEARCH_SPACE["ubatch_size"]["high"]
+    threads_high = min(SEARCH_SPACE["threads"]["high"], hardware_profile.recommended_threads)
+
+    if arch == "diffused":
+        if model_size_gb >= 10:
+            batch_high = min(batch_high, 1024)
+            ubatch_high = min(ubatch_high, 256)
+        else:
+            batch_high = min(batch_high, 2048)
+            ubatch_high = min(ubatch_high, 512)
+        threads_high = min(threads_high, 8)
+    elif arch == "lfm":
+        batch_low = max(batch_low, 256)
+        ubatch_low = max(ubatch_low, 64)
+        batch_high = min(batch_high, 16384)
+        ubatch_high = min(ubatch_high, 8192)
+    elif arch == "bitnet":
+        batch_high = min(batch_high, 2048)
+        ubatch_high = min(ubatch_high, 512)
+
+    if profile == "gpu-first":
+        if arch != "bitnet":
+            batch_high = min(batch_high, 2048)
+            ubatch_high = min(ubatch_high, 512 if arch == "diffused" else 1024)
+    elif profile == "economic":
+        batch_high = min(batch_high, 1024)
+        ubatch_high = min(ubatch_high, 256)
+    elif profile == "throughput":
+        if arch == "lfm":
+            batch_low = max(batch_low, 512)
+            ubatch_low = max(ubatch_low, 128)
+        else:
+            batch_high = min(batch_high, 4096)
+            ubatch_high = min(ubatch_high, 1024)
+
+    if arch == "lfm" and profile == "throughput":
+        batch_candidates = [512, 1024, 2048, 4096, 6144, 8192, 9084, 12288, 16384]
+        batch_candidates = [candidate for candidate in batch_candidates if batch_low <= candidate <= batch_high]
+        batch = trial.suggest_categorical("batch", batch_candidates)
+        ubatch_candidates = [128, 256, 512, 1024, 2048, 4096, 6338, 8192]
+        ubatch_candidates = [candidate for candidate in ubatch_candidates if ubatch_low <= candidate <= ubatch_high]
+        if not ubatch_candidates:
+            ubatch_candidates = [min(batch, ubatch_high)]
+        ubatch = min(batch, trial.suggest_categorical("ubatch", ubatch_candidates))
+    else:
+        batch = trial.suggest_int("batch", batch_low, batch_high)
+        ubatch = trial.suggest_int("ubatch", ubatch_low, min(batch, ubatch_high))
+    threads = trial.suggest_int("threads", SEARCH_SPACE["threads"]["low"], threads_high)
     gpu_layers = trial.suggest_int("gpu_layers", SEARCH_SPACE["gpu_layers"]["low"], SEARCH_SPACE["gpu_layers"]["high"])
     cpu_offload_ratio = trial.suggest_float(
         "cpu_offload_ratio",
@@ -321,7 +381,7 @@ def _build_benchmark_command(
     ]
 
     if tuned_params.get("flash_attn") == 1 and capabilities.get("flash_attn", True):
-        cmd.append("--flash-attn")
+        cmd.extend(["--flash-attn", "1"])
     override_key = tuned_params.get("override_tensor", "none")
     if override_key != "none" and capabilities.get("override_tensor", True):
         cmd.extend(["--override-tensor", OVERRIDE_PATTERNS[override_key]])
@@ -382,10 +442,11 @@ def _objective(
     llama_bench_path: str,
     model_path: str,
     arch: str,
+    profile: str,
     hardware_profile: HardwareProfile,
     capabilities: Optional[Dict[str, bool]] = None,
 ):
-    params = _base_trial_params(trial, hardware_profile)
+    params = _base_trial_params_for_arch(trial, hardware_profile, arch=arch, model_path=model_path, profile=profile)
     kv_config = build_kv_cache_config(trial)
     params.update(asdict(kv_config))
 
@@ -399,6 +460,7 @@ def _objective(
         params=params,
         recommended_threads=hardware_profile.recommended_threads,
         optimal_offload_ratio=hardware_profile.optimal_offload_ratio,
+        profile=profile,
         gpu_available=hardware_profile.gpu_available,
     )
     cmd = _build_benchmark_command(
@@ -414,7 +476,11 @@ def _objective(
     try:
         metrics = _run_multi_metric_bench(cmd, tuned_params, hardware_profile, n_tokens)
     except Exception as exc:
-        trial.set_user_attr("failure", str(exc))
+        failure_message = str(exc)
+        trial.set_user_attr("failure", failure_message)
+        trial.set_user_attr("failed_command", shlex.join(cmd))
+        print(f"[trial {trial.number}] failed: {failure_message}")
+        print(f"[trial {trial.number}] command: {shlex.join(cmd)}")
         return math.inf, math.inf, 0.0, 0.0
 
     trial.set_user_attr("command", shlex.join(cmd))
@@ -432,14 +498,105 @@ def _objective(
 
 
 def _select_best_trial(study: optuna.study.Study) -> optuna.trial.FrozenTrial:
+    return _select_best_trial_for_profile(study, "balanced")
+
+
+def _select_best_trial_for_profile(study: optuna.study.Study, profile: str) -> optuna.trial.FrozenTrial:
     def score(trial: optuna.trial.FrozenTrial) -> float:
         ttft, itl, tokens_per_joule, vram_eff = trial.values
-        return (-ttft) + (-itl) + (tokens_per_joule * 100.0) + (vram_eff * 1000.0)
+        tuned = trial.user_attrs.get("tuned_params", {})
+        gpu_layers = int(tuned.get("gpu_layers", 0))
+        cpu_offload_ratio = float(tuned.get("cpu_offload_ratio", 0.0))
+        base = (-ttft) + (-itl) + (tokens_per_joule * 100.0) + (vram_eff * 1000.0)
+        if profile == "gpu-first":
+            base += gpu_layers * 0.8
+            base -= cpu_offload_ratio * 150.0
+        elif profile == "economic":
+            base += tokens_per_joule * 120.0
+            base += vram_eff * 2000.0
+            base -= gpu_layers * 0.2
+        elif profile == "throughput":
+            metrics = trial.user_attrs.get("metrics", {})
+            generation_tps = float(metrics.get("generation_tokens_per_second", 0.0))
+            prompt_tps = float(metrics.get("prompt_tokens_per_second", 0.0))
+            # Throughput mode should behave like a throughput tuner first,
+            # with latency and efficiency only acting as tie-breakers.
+            base = generation_tps * 1000.0
+            base += prompt_tps * 0.01
+            base += tokens_per_joule * 10.0
+            base -= ttft
+            base -= itl
+        return base
 
-    complete_trials = [trial for trial in study.best_trials if trial.values]
+    complete_trials = [
+        trial
+        for trial in study.best_trials
+        if trial.values
+        and all(math.isfinite(value) for value in trial.values)
+        and trial.values[2] > 0
+        and trial.values[3] > 0
+    ]
     if not complete_trials:
-        raise RuntimeError("No successful trials completed.")
+        failures = [
+            {
+                "trial": trial.number,
+                "failure": trial.user_attrs.get("failure", "unknown failure"),
+                "command": trial.user_attrs.get("failed_command", ""),
+            }
+            for trial in study.trials
+        ]
+        raise RuntimeError(f"No successful trials completed. Failures: {failures}")
     return max(complete_trials, key=score)
+
+
+def _successful_trials(study: optuna.study.Study) -> List[optuna.trial.FrozenTrial]:
+    return [
+        trial
+        for trial in study.trials
+        if trial.values
+        and all(math.isfinite(value) for value in trial.values)
+        and trial.values[2] > 0
+        and trial.values[3] > 0
+        and "metrics" in trial.user_attrs
+    ]
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    size = len(ordered)
+    if size == 0:
+        return 0.0
+    midpoint = size // 2
+    if size % 2 == 1:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+def build_trial_summary(study: optuna.study.Study) -> Dict[str, float]:
+    trials = _successful_trials(study)
+    prompt_tps = [float(trial.user_attrs["metrics"]["prompt_tokens_per_second"]) for trial in trials]
+    generation_tps = [float(trial.user_attrs["metrics"]["generation_tokens_per_second"]) for trial in trials]
+    if not trials:
+        return {
+            "successful_trials": 0,
+            "total_trials": len(study.trials),
+            "best_prompt_tps": 0.0,
+            "worst_prompt_tps": 0.0,
+            "median_prompt_tps": 0.0,
+            "best_generation_tps": 0.0,
+            "worst_generation_tps": 0.0,
+            "median_generation_tps": 0.0,
+        }
+    return {
+        "successful_trials": len(trials),
+        "total_trials": len(study.trials),
+        "best_prompt_tps": max(prompt_tps),
+        "worst_prompt_tps": min(prompt_tps),
+        "median_prompt_tps": _median(prompt_tps),
+        "best_generation_tps": max(generation_tps),
+        "worst_generation_tps": min(generation_tps),
+        "median_generation_tps": _median(generation_tps),
+    }
 
 
 def _format_server_command(
@@ -457,6 +614,7 @@ def _format_server_command(
             params=dict(best_trial.params),
             recommended_threads=int(hardware.get("recommended_threads", max_threads)),
             optimal_offload_ratio=float(hardware.get("optimal_offload_ratio", 1.0)),
+            profile="balanced",
             gpu_available=bool(hardware.get("gpu_available", True)),
         )
     command = [
@@ -511,12 +669,45 @@ def _format_server_command(
     return shlex.join(command)
 
 
-def format_optimal_output_block(model_path: str, draft_model_name: str, launch_command: str) -> str:
+def format_optimal_output_block(
+    model_path: str,
+    draft_model_name: str,
+    launch_command: str,
+    llama_bin_path: str,
+    summary: Dict[str, float],
+) -> str:
+    model_name = Path(model_path).name
+    env_lines = [
+        f"LLAMA_BIN={llama_bin_path}",
+        f"MODEL={model_path}",
+    ]
+    if draft_model_name != "disabled":
+        env_lines.append(f"DRAFT_MODEL={draft_model_name}")
     return "\n".join(
         [
             "=" * 50,
             "[TEST_llama-optimus] OPTIMAL ORCHESTRATION FOUND:",
-            f"Target: {Path(model_path).name} | Draft: {draft_model_name}",
+            f"Target: {model_name} | Draft: {draft_model_name}",
+            "",
+            "+" + "-" * 48 + "+",
+            "| PERFORMANCE SUMMARY".ljust(49) + "|",
+            "+" + "-" * 48 + "+",
+            f"| Successful trials : {int(summary['successful_trials'])}/{int(summary['total_trials'])}".ljust(49) + "|",
+            f"| BEST TG tok/sec   : {summary['best_generation_tps']:.2f}".ljust(49) + "|",
+            f"| MEDIAN TG tok/sec : {summary['median_generation_tps']:.2f}".ljust(49) + "|",
+            f"| WORST TG tok/sec  : {summary['worst_generation_tps']:.2f}".ljust(49) + "|",
+            f"| BEST PP tok/sec   : {summary['best_prompt_tps']:.2f}".ljust(49) + "|",
+            f"| MEDIAN PP tok/sec : {summary['median_prompt_tps']:.2f}".ljust(49) + "|",
+            f"| WORST PP tok/sec  : {summary['worst_prompt_tps']:.2f}".ljust(49) + "|",
+            "+" + "-" * 48 + "+",
+            "",
+            "[FORMULA] COPY/PASTE SERVER COMMAND:",
+            *env_lines,
+            "",
+            "```bash",
+            launch_command,
+            "```",
+            "",
             f"Launch Command: {launch_command}",
             "=" * 50,
         ]
@@ -533,11 +724,12 @@ def run_optimization(
     llama_bin_path,
     override_mode,
     arch,
+    profile="balanced",
     hardware_profile: Optional[HardwareProfile] = None,
 ):
     del metric
     del override_mode
-    profile = hardware_profile or build_hardware_profile()
+    hw_profile = hardware_profile or build_hardware_profile()
     capabilities = detect_binary_capabilities(llama_bench_path)
     sampler = TPESampler(multivariate=True)
     study = optuna.create_study(
@@ -552,13 +744,15 @@ def run_optimization(
             llama_bench_path=llama_bench_path,
             model_path=model_path,
             arch=arch,
-            hardware_profile=profile,
+            profile=profile,
+            hardware_profile=hw_profile,
             capabilities=capabilities,
         ),
         n_trials=n_trials,
     )
 
-    best_trial = _select_best_trial(study)
+    best_trial = _select_best_trial_for_profile(study, profile)
+    summary = build_trial_summary(study)
     tuned_params = best_trial.user_attrs.get("tuned_params", {})
     draft_model_name = tuned_params.get("draft_model") or "disabled"
     launch_command = _format_server_command(
@@ -568,11 +762,12 @@ def run_optimization(
         arch=arch,
     )
 
-    print(format_optimal_output_block(model_path, draft_model_name, launch_command))
+    print(format_optimal_output_block(model_path, draft_model_name, launch_command, llama_bin_path, summary))
 
     return {
         "study": study,
         "best_trial": best_trial,
-        "hardware_profile": profile,
+        "hardware_profile": hw_profile,
         "launch_command": launch_command,
+        "summary": summary,
     }

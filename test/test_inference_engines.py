@@ -14,6 +14,22 @@ class FakeTrial:
         return choices[-1]
 
 
+class RecordingSpeculativeTrial:
+    def __init__(self):
+        self.ranges = {}
+
+    def suggest_int(self, name, low, high):
+        self.ranges[name] = (low, high)
+        if name == "draft_min":
+            return high
+        if name == "draft_max":
+            return low
+        return high
+
+    def suggest_categorical(self, name, choices):
+        return choices[-1]
+
+
 def test_suggest_draft_model_reduces_model_size_hint():
     draft = suggest_draft_model("/models/qwen3-32b-q4.gguf")
     assert draft is not None
@@ -26,6 +42,7 @@ def test_architecture_constraints_for_bitnet_and_lfm():
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        profile="balanced",
         gpu_available=False,
     )
     lfm = apply_architecture_constraints(
@@ -33,6 +50,7 @@ def test_architecture_constraints_for_bitnet_and_lfm():
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        profile="balanced",
         gpu_available=True,
     )
 
@@ -51,7 +69,17 @@ def test_build_speculative_and_kv_configs_cover_new_knobs():
     assert speculative.draft_model is not None
     assert speculative.draft_max >= speculative.draft_min
     assert kv_config.eviction_policy in {"disabled", "h2o", "chunkkv"}
-    assert kv_config.cache_type_k in {"f16", "q8_0", "q4_0", "mixed"}
+    assert kv_config.cache_type_k in {"f16", "q8_0", "q4_0"}
+
+
+def test_build_speculative_config_uses_static_range_and_clamps_draft_max():
+    trial = RecordingSpeculativeTrial()
+
+    speculative = build_speculative_config(trial, "/models/qwen3-32b-q4.gguf")
+
+    assert trial.ranges["draft_max"] == (4, 32)
+    assert speculative.draft_min == 8
+    assert speculative.draft_max == 8
 
 
 def test_architecture_constraints_for_diffused_and_mtp():
@@ -60,6 +88,7 @@ def test_architecture_constraints_for_diffused_and_mtp():
         params={"batch": 64, "ubatch": 80, "threads": 24, "gpu_layers": 40, "micro_batch_ratio": 0.2},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        profile="balanced",
         gpu_available=True,
     )
     mtp = apply_architecture_constraints(
@@ -67,6 +96,7 @@ def test_architecture_constraints_for_diffused_and_mtp():
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40, "draft_model": "/x.gguf"},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        profile="balanced",
         gpu_available=True,
     )
 
@@ -82,9 +112,35 @@ def test_lfm_falls_back_to_cpu_when_gpu_unavailable():
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        profile="balanced",
         gpu_available=False,
     )
 
     assert lfm["gpu_layers"] == 0
     assert lfm["cpu_offload_ratio"] == 1.0
     assert lfm["draft_model"] is None
+
+
+def test_gpu_first_profile_keeps_gpu_layers_high_and_disables_override():
+    tuned = apply_architecture_constraints(
+        arch="diffused",
+        params={
+            "batch": 128,
+            "ubatch": 64,
+            "threads": 8,
+            "gpu_layers": 4,
+            "cpu_offload_ratio": 0.8,
+            "override_tensor": "ffn_cpu_all",
+            "cache_type_k": "q4_0",
+            "cache_type_v": "q8_0",
+        },
+        recommended_threads=8,
+        optimal_offload_ratio=0.75,
+        profile="gpu-first",
+        gpu_available=True,
+    )
+
+    assert tuned["gpu_layers"] >= 32
+    assert tuned["override_tensor"] == "none"
+    assert tuned["cache_type_k"] == "f16"
+    assert tuned["cache_type_v"] == "f16"

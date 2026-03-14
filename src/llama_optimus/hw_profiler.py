@@ -27,6 +27,7 @@ class HardwareProfile:
     physical_cores: int
     recommended_threads: int
     gpu_name: str = "unknown"
+    gpu_available: bool = False
     is_blackwell: bool = False
     enable_nvfp4: bool = False
     enable_pdl: bool = False
@@ -89,6 +90,13 @@ def detect_gpu_name() -> str:
         if "nvidia" in lowered and "vga" in lowered:
             return line.split(": ", 1)[-1].strip()
     return "unknown"
+
+
+def detect_gpu_available() -> bool:
+    query = _safe_run(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
+    )
+    return bool(query.strip())
 
 
 def is_blackwell_gpu(gpu_name: str) -> bool:
@@ -157,6 +165,7 @@ def build_hardware_profile() -> HardwareProfile:
         physical_cores=physical_cores,
         recommended_threads=recommended_threads,
         gpu_name=gpu_name,
+        gpu_available=detect_gpu_available(),
         is_blackwell=blackwell,
         enable_nvfp4=blackwell,
         enable_pdl=blackwell,

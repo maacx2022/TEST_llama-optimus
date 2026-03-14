@@ -93,6 +93,7 @@ def apply_architecture_constraints(
     params: Dict[str, object],
     recommended_threads: int,
     optimal_offload_ratio: float,
+    gpu_available: bool = True,
 ) -> Dict[str, object]:
     tuned = dict(params)
     tuned["arch"] = arch
@@ -105,11 +106,15 @@ def apply_architecture_constraints(
         tuned["ubatch"] = min(int(tuned["batch"]), int(tuned["ubatch"]))
         tuned["micro_batch_ratio"] = max(float(tuned.get("micro_batch_ratio", 0.5)), 0.35)
     elif arch == "lfm":
-        tuned["gpu_layers"] = 999
+        tuned["gpu_layers"] = 999 if gpu_available else 0
         tuned["kv_eviction_policy"] = "disabled"
         tuned["cache_type_k"] = "f16"
         tuned["cache_type_v"] = "f16"
-        tuned["cpu_offload_ratio"] = 0.0
+        tuned["cpu_offload_ratio"] = 0.0 if gpu_available else 1.0
+        tuned["draft_model"] = None
+        tuned["draft_min"] = 0
+        tuned["draft_max"] = 0
+        tuned["draft_gpu_layers"] = 0
     elif arch == "bitnet":
         tuned["gpu_layers"] = 0
         tuned["threads"] = recommended_threads
@@ -122,4 +127,3 @@ def apply_architecture_constraints(
         tuned["draft_gpu_layers"] = 0
     tuned["dynamic_offload_ratio"] = optimal_offload_ratio
     return tuned
-

@@ -35,6 +35,32 @@ class BenchmarkMetrics:
     formulas: Dict[str, str]
 
 
+def detect_binary_capabilities(binary_path: str) -> Dict[str, bool]:
+    try:
+        result = subprocess.run(
+            [binary_path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+    except Exception:
+        return {}
+
+    help_text = result.stdout + "\n" + result.stderr
+    return {
+        "draft_model": "-md" in help_text or "--draft-model" in help_text,
+        "kv_evict": "--kv-evict" in help_text,
+        "h2o": "--h2o-heavy-hitters" in help_text and "--h2o-window" in help_text,
+        "cache_type_k": "--cache-type-k" in help_text,
+        "cache_type_v": "--cache-type-v" in help_text,
+        "flash_attn": "--flash-attn" in help_text,
+        "override_tensor": "--override-tensor" in help_text,
+        "nvfp4": "--nvfp4" in help_text,
+        "pdl": "--pdl" in help_text,
+    }
+
+
 def estimate_max_ngl(llama_bench_path, model_path, min_ngl=0, max_ngl=SEARCH_SPACE["gpu_layers"]["high"]):
     low, high = min_ngl, max_ngl
     while low < high:
@@ -268,7 +294,9 @@ def _build_benchmark_command(
     n_tokens: int,
     tuned_params: Dict[str, object],
     hardware_profile: HardwareProfile,
+    capabilities: Optional[Dict[str, bool]] = None,
 ) -> List[str]:
+    capabilities = capabilities or {}
     cmd = [
         llama_bench_path,
         "--model",
@@ -292,14 +320,14 @@ def _build_benchmark_command(
         "--no-warmup",
     ]
 
-    if tuned_params.get("flash_attn") == 1:
+    if tuned_params.get("flash_attn") == 1 and capabilities.get("flash_attn", True):
         cmd.append("--flash-attn")
     override_key = tuned_params.get("override_tensor", "none")
-    if override_key != "none":
+    if override_key != "none" and capabilities.get("override_tensor", True):
         cmd.extend(["--override-tensor", OVERRIDE_PATTERNS[override_key]])
 
     draft_model = tuned_params.get("draft_model")
-    if draft_model:
+    if draft_model and capabilities.get("draft_model", False):
         cmd.extend(
             [
                 "-md",
@@ -313,19 +341,24 @@ def _build_benchmark_command(
             ]
         )
 
-    if tuned_params.get("kv_eviction_policy") in {"h2o", "chunkkv"}:
+    if tuned_params.get("kv_eviction_policy") in {"h2o", "chunkkv"} and capabilities.get("kv_evict", False):
         cmd.extend(
             [
                 "--kv-evict",
                 str(tuned_params["kv_eviction_policy"]),
-                "--h2o-heavy-hitters",
-                str(tuned_params.get("h2o_heavy_hitters", 0)),
-                "--h2o-window",
-                str(tuned_params.get("h2o_window", 0)),
             ]
         )
+        if capabilities.get("h2o", False):
+            cmd.extend(
+                [
+                    "--h2o-heavy-hitters",
+                    str(tuned_params.get("h2o_heavy_hitters", 0)),
+                    "--h2o-window",
+                    str(tuned_params.get("h2o_window", 0)),
+                ]
+            )
 
-    if tuned_params.get("arch") != "lfm":
+    if tuned_params.get("arch") != "lfm" and capabilities.get("cache_type_k", True) and capabilities.get("cache_type_v", True):
         cmd.extend(
             [
                 "--cache-type-k",
@@ -335,9 +368,9 @@ def _build_benchmark_command(
             ]
         )
 
-    if hardware_profile.enable_nvfp4:
+    if hardware_profile.enable_nvfp4 and capabilities.get("nvfp4", False):
         cmd.append("--nvfp4")
-    if hardware_profile.enable_pdl:
+    if hardware_profile.enable_pdl and capabilities.get("pdl", False):
         cmd.append("--pdl")
     return cmd
 
@@ -350,6 +383,7 @@ def _objective(
     model_path: str,
     arch: str,
     hardware_profile: HardwareProfile,
+    capabilities: Optional[Dict[str, bool]] = None,
 ):
     params = _base_trial_params(trial, hardware_profile)
     kv_config = build_kv_cache_config(trial)
@@ -365,6 +399,7 @@ def _objective(
         params=params,
         recommended_threads=hardware_profile.recommended_threads,
         optimal_offload_ratio=hardware_profile.optimal_offload_ratio,
+        gpu_available=hardware_profile.gpu_available,
     )
     cmd = _build_benchmark_command(
         llama_bench_path=llama_bench_path,
@@ -373,6 +408,7 @@ def _objective(
         n_tokens=n_tokens,
         tuned_params=tuned_params,
         hardware_profile=hardware_profile,
+        capabilities=capabilities,
     )
 
     try:
@@ -421,6 +457,7 @@ def _format_server_command(
             params=dict(best_trial.params),
             recommended_threads=int(hardware.get("recommended_threads", max_threads)),
             optimal_offload_ratio=float(hardware.get("optimal_offload_ratio", 1.0)),
+            gpu_available=bool(hardware.get("gpu_available", True)),
         )
     command = [
         "python",
@@ -501,6 +538,7 @@ def run_optimization(
     del metric
     del override_mode
     profile = hardware_profile or build_hardware_profile()
+    capabilities = detect_binary_capabilities(llama_bench_path)
     sampler = TPESampler(multivariate=True)
     study = optuna.create_study(
         directions=["minimize", "minimize", "maximize", "maximize"],
@@ -515,6 +553,7 @@ def run_optimization(
             model_path=model_path,
             arch=arch,
             hardware_profile=profile,
+            capabilities=capabilities,
         ),
         n_trials=n_trials,
     )

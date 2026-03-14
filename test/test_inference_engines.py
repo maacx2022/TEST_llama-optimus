@@ -26,12 +26,14 @@ def test_architecture_constraints_for_bitnet_and_lfm():
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        gpu_available=False,
     )
     lfm = apply_architecture_constraints(
         arch="lfm",
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        gpu_available=True,
     )
 
     assert bitnet["gpu_layers"] == 0
@@ -58,15 +60,31 @@ def test_architecture_constraints_for_diffused_and_mtp():
         params={"batch": 64, "ubatch": 80, "threads": 24, "gpu_layers": 40, "micro_batch_ratio": 0.2},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        gpu_available=True,
     )
     mtp = apply_architecture_constraints(
         arch="mtp",
         params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40, "draft_model": "/x.gguf"},
         recommended_threads=8,
         optimal_offload_ratio=0.75,
+        gpu_available=True,
     )
 
     assert diffused["flash_attn"] == 1
     assert diffused["ubatch"] <= diffused["batch"]
     assert mtp["draft_model"] is None
     assert mtp["draft_max"] == 0
+
+
+def test_lfm_falls_back_to_cpu_when_gpu_unavailable():
+    lfm = apply_architecture_constraints(
+        arch="lfm",
+        params={"batch": 64, "ubatch": 32, "threads": 24, "gpu_layers": 40},
+        recommended_threads=8,
+        optimal_offload_ratio=0.75,
+        gpu_available=False,
+    )
+
+    assert lfm["gpu_layers"] == 0
+    assert lfm["cpu_offload_ratio"] == 1.0
+    assert lfm["draft_model"] is None

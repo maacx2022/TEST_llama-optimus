@@ -1,10 +1,12 @@
 import math
 import os
+import re
 import shlex
 import subprocess
 import tempfile
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -714,6 +716,56 @@ def format_optimal_output_block(
     )
 
 
+def _build_formula_script(
+    model_path: str,
+    draft_model_name: str,
+    launch_command: str,
+    llama_bin_path: str,
+) -> str:
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        "",
+        f"LLAMA_BIN={shlex.quote(llama_bin_path)}",
+        f"MODEL={shlex.quote(model_path)}",
+    ]
+    if draft_model_name != "disabled":
+        lines.append(f"DRAFT_MODEL={shlex.quote(draft_model_name)}")
+    lines.extend(
+        [
+            "",
+            launch_command,
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def save_formula_script(
+    model_path: str,
+    draft_model_name: str,
+    launch_command: str,
+    llama_bin_path: str,
+    output_dir: str = "/home/macko/Desktop/Serwery_LLM",
+) -> Path:
+    target_dir = Path(output_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(model_path).stem)
+    target_path = target_dir / f"{safe_stem}-{timestamp}.sh"
+    target_path.write_text(
+        _build_formula_script(
+            model_path=model_path,
+            draft_model_name=draft_model_name,
+            launch_command=launch_command,
+            llama_bin_path=llama_bin_path,
+        ),
+        encoding="utf-8",
+    )
+    target_path.chmod(0o755)
+    return target_path
+
+
 def run_optimization(
     n_trials,
     n_tokens,
@@ -761,8 +813,15 @@ def run_optimization(
         best_trial=best_trial,
         arch=arch,
     )
+    formula_path = save_formula_script(
+        model_path=model_path,
+        draft_model_name=draft_model_name,
+        launch_command=launch_command,
+        llama_bin_path=llama_bin_path,
+    )
 
     print(format_optimal_output_block(model_path, draft_model_name, launch_command, llama_bin_path, summary))
+    print(f"Saved formula: {formula_path}")
 
     return {
         "study": study,
@@ -770,4 +829,5 @@ def run_optimization(
         "hardware_profile": hw_profile,
         "launch_command": launch_command,
         "summary": summary,
+        "formula_path": str(formula_path),
     }

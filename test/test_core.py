@@ -10,6 +10,7 @@ from llama_optimus.core import (
     _select_best_trial,
     build_trial_summary,
     format_optimal_output_block,
+    save_formula_script,
 )
 from llama_optimus.hw_profiler import HardwareProfile
 from llama_optimus.search_space import SEARCH_SPACE
@@ -243,3 +244,21 @@ def test_lfm_throughput_uses_high_batch_and_ubatch_candidates(tmp_path):
     assert 6338 in trial.choices["ubatch"]
     assert params["batch"] >= 9084
     assert params["ubatch"] >= 6338
+
+
+def test_save_formula_script_writes_shell_formula(tmp_path):
+    output = save_formula_script(
+        model_path="/models/LFM2.5.gguf",
+        draft_model_name="disabled",
+        launch_command="python -m llama_cpp.server --model /models/LFM2.5.gguf --threads 8",
+        llama_bin_path="/llama/bin",
+        output_dir=str(tmp_path),
+    )
+
+    content = output.read_text(encoding="utf-8")
+
+    assert output.is_file()
+    assert output.suffix == ".sh"
+    assert "LLAMA_BIN=/llama/bin" in content
+    assert "MODEL=/models/LFM2.5.gguf" in content
+    assert "python -m llama_cpp.server --model /models/LFM2.5.gguf --threads 8" in content
